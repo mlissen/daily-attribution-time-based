@@ -10,7 +10,7 @@ from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql.utils import AnalysisException
 from datetime import datetime, timedelta
 from pyspark.sql.window import Window
-from pyspark.sql.types import ArrayType, DecimalType
+from pyspark.sql.types import ArrayType, DecimalType, IntegerType
 
 # Initialize Spark and Glue contexts
 glueContext = GlueContext(SparkContext.getOrCreate())
@@ -212,6 +212,7 @@ while current_date <= end_date:
         continue
 
     current_sales = sales_data.filter(col("date") == current_date)
+
     current_ad_traffic = placements_data.filter(col("date") == current_date)
     
     logger.info(f"LISS Current sales count: {current_sales.count()}")
@@ -398,11 +399,16 @@ while current_date <= end_date:
     )
 
     time_based_conversions = time_based_conversions.withColumn(
-        "units_sold", col("units_sold").cast("integer")
+        "daily_budget", col("daily_budget").cast(DecimalType(10,2))
     ).withColumn(
-        "sales", col("sales").cast("decimal(10,2)")
+        "units_sold", col("units_sold").cast(IntegerType())
+    ).withColumn(
+        "sales", col("sales").cast(DecimalType(10,2))
     )
-    
+
+    # Add logging to verify the data types
+    logger.info(f"LISS Data types after casting: {time_based_conversions.dtypes}")
+        
     time_based_conversions = time_based_conversions.withColumn(
     "daily_budget", col("daily_budget").cast(DecimalType(10,2))
     )
