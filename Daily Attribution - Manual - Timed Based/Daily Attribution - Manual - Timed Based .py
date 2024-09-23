@@ -222,6 +222,9 @@ while current_date <= end_date:
     logger.info(f"LISS Current sales columns: {current_sales.columns}")
     logger.info(f"LISS Current ad traffic columns: {current_ad_traffic.columns}")
     
+    log_sample_data(current_sales, "cuurent Sales data:")
+    log_sample_data(current_ad_traffic, "cuurent ad traffic data:")
+    
     attributed_data = current_sales.join(current_ad_traffic, 
                                          (current_sales.sku == current_ad_traffic.placement_tracked_skus) & 
                                          (current_sales.location_id == current_ad_traffic.locationid), 
@@ -370,6 +373,7 @@ while current_date <= end_date:
     
     # Aggregate metrics for time-based attribution
     time_based_conversions = final_data.groupBy(
+        col("sales_date"),
         col("organization_name").alias("retailer_name"),
         col("advertiserOrgId").alias("advertiser_org_id"),
         col("daily_budget"),
