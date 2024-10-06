@@ -5,12 +5,17 @@ from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
-from pyspark.sql.functions import to_date, lit, when, avg, sum, round, concat_ws, from_unixtime, unix_timestamp, row_number, expr, min, max, coalesce, explode, col, to_timestamp, from_unixtime
+from pyspark.sql.functions import (
+    to_date, lit, when, avg, sum, round, concat_ws, from_unixtime, 
+    unix_timestamp, row_number, expr, min, max, coalesce, explode, 
+    col, to_timestamp, year, month, dayofmonth, lpad
+)
 from awsglue.dynamicframe import DynamicFrame
 from pyspark.sql.utils import AnalysisException
 from datetime import datetime, timedelta
 from pyspark.sql.window import Window
 from pyspark.sql.types import ArrayType, DecimalType, IntegerType
+
 
 # Initialize Spark and Glue contexts
 glueContext = GlueContext(SparkContext.getOrCreate())
@@ -66,15 +71,31 @@ def check_empty_df(df, description):
 
 # Load sales data
 sales_start_date = start_date - timedelta(days=60)
-sales_data = load_data_with_predicates("aggregatedsales", "aggregatedsales", sales_start_date, end_date)
+sales_data = load_data_with_predicates("aggregatedsales", "sproutmart", sales_start_date, end_date)
 logger.info(f"LISS Sales data loaded. Row count: {sales_data.count()}")
 check_empty_df(sales_data, "sales data")
 
-# Add sales_date column
+# Ensure 'year', 'month', and 'day' are strings
+sales_data = sales_data.withColumn("year", col("year").cast("string"))
+sales_data = sales_data.withColumn("month", col("month").cast("string"))
+sales_data = sales_data.withColumn("day", col("day").cast("string"))
+
+# Construct 'date' column from 'year', 'month', and 'day'
 sales_data = sales_data.withColumn(
-    "sales_date",
+    "date",
     to_date(concat_ws("-", col("year"), col("month"), col("day")), "yyyy-MM-dd")
 )
+
+# Ensure 'sales_year', 'sales_month', 'sales_day' are integers
+sales_data = sales_data.withColumn("sales_year", col("year").cast("int")) \
+                       .withColumn("sales_month", col("month").cast("int")) \
+                       .withColumn("sales_day", col("day").cast("int"))
+
+# Verify the 'date' column
+sales_data.select("order_id", "sku", "date", "sales_year", "sales_month", "sales_day").show(5, truncate=False)
+
+
+
 
 # Load ad traffic data
 ad_traffic_start_date = start_date - timedelta(days=60)
@@ -84,7 +105,6 @@ check_empty_df(placements_data, "ad traffic data")
 
 
 #Adding date columns
-sales_data = sales_data.withColumn("date", to_date(col("timestamp")))
 placements_data = placements_data.withColumn("date", to_date(from_unixtime(col("begintime") / 1000)))
 
 sales_row_count = sales_data.count()
@@ -115,11 +135,10 @@ logger.info(f"LISS Latest ad traffic date: {latest_ad_traffic_date}")
 
 # Process winning bid columns
 try:
-    placements_data = placements_data.withColumn("winningbidamount",
-        when(col("winningbidamount.double").isNotNull(), col("winningbidamount.double"))
-        .when(col("winningbidamount.int").isNotNull(), col("winningbidamount.int").cast("double"))
-        .otherwise(None)
-    )
+    # Cast 'winningbidamount' and 'winningbidprice' to double
+    placements_data = placements_data.withColumn("winningbidamount", col("winningbidamount").cast("double"))
+    placements_data = placements_data.withColumn("winningbidprice", col("winningbidprice").cast("double"))
+
 except AnalysisException:
     placements_data = placements_data.withColumn("winningbidamount", col("winningbidamount").cast("double"))
 
@@ -139,12 +158,10 @@ placements_data = placements_data.withColumn("placement_tracked_skus", col("plac
 # Log all column names after processing
 logger.info(f"LISS Columns in placements_data after processing: {placements_data.columns}")
 
-# Cast columns to appropriate types
-sales_data = sales_data.withColumn("sale_amount", when(col("sale_amount.double").isNotNull(), col("sale_amount.double")).when(col("sale_amount.int").isNotNull(), col("sale_amount.int").cast("double")).otherwise(None))
 
-sales_data = sales_data.withColumnRenamed("year", "sales_year") \
-                       .withColumnRenamed("month", "sales_month") \
-                       .withColumnRenamed("day", "sales_day")
+# Directly cast 'sale_amount' to double
+sales_data = sales_data.withColumn("sale_amount", col("sale_amount").cast("double"))
+
 
 placements_data = placements_data.withColumnRenamed("year", "placement_year") \
                                  .withColumnRenamed("month", "placement_month") \
@@ -178,6 +195,20 @@ def get_historical_baseline(current_date, sales_data, ad_traffic_data):
     historical_start_date = historical_end_date - timedelta(days=59)
     historical_sales = sales_data.filter((col("date") >= historical_start_date) & (col("date") <= historical_end_date))
     historical_ad_traffic = ad_traffic_data.filter((col("date") >= historical_start_date) & (col("date") <= historical_end_date))
+    
+    # Log earliest date in historical sales data
+    if not historical_sales.rdd.isEmpty():
+        earliest_sales_date = historical_sales.agg(min("date")).collect()[0][0]
+        logger.info(f"LISS Earliest historical sales date: {earliest_sales_date}")
+    else:
+        logger.warn("LISS No historical sales data available.")
+
+    # Log earliest date in historical ad traffic data
+    if not historical_ad_traffic.rdd.isEmpty():
+        earliest_ad_traffic_date = historical_ad_traffic.agg(min("date")).collect()[0][0]
+        logger.info(f"LISS Earliest historical ad traffic date: {earliest_ad_traffic_date}")
+    else:
+        logger.warn("LISS No historical ad traffic data available.")
     
     logger.info(f"LISS Historical sales count: {historical_sales.count()}")
     logger.info(f"LISS Historical ad traffic count: {historical_ad_traffic.count()}")
@@ -232,12 +263,15 @@ while current_date <= end_date:
     attributed_data = attributed_data.withColumn("attribution_type", lit("time_based"))
     logger.info(f"LISS Attributed data count: {attributed_data.count()}")
     
+    log_sample_data(attributed_data, "Attributed data:")
+    
     # Log column names for debugging
     logger.info(f"LISS Attributed data columns: {attributed_data.columns}")
     
     
     # Convert timestamp string to timestamp type
-    attributed_data = attributed_data.withColumn("timestamp", to_timestamp("timestamp"))
+    attributed_data = attributed_data.withColumn("timestamp", from_unixtime(col("timestamp").cast("long")))
+
     
     # Convert begintime and endtime from milliseconds to timestamp
     attributed_data = attributed_data.withColumn("begintime", from_unixtime(col("begintime") / 1000))
@@ -365,10 +399,15 @@ while current_date <= end_date:
 
     log_sample_data(final_data, "Final data:")
     
+    # Update sales_date construction using lpad and concat_ws
     final_data = final_data.withColumn(
-            "sales_date",
-            to_date(concat_ws("-", col("sales_year"), col("sales_month"), col("sales_day")), "yyyy-MM-dd")
-        )
+        "sales_date",
+        to_date(concat_ws("",
+            col("sales_year"),
+            lpad(col("sales_month").cast("string"), 2, "0"),
+            lpad(col("sales_day").cast("string"), 2, "0")
+        ), "yyyyMMdd")
+    )
 
     
     # Aggregate metrics for time-based attribution
@@ -417,7 +456,6 @@ while current_date <= end_date:
     "daily_budget", col("daily_budget").cast(DecimalType(10,2))
     )
     
-    # Add the sales_date column after the aggregation
     time_based_conversions = time_based_conversions.withColumn("attribution_method", lit("time_based_incremental"))
 
     # Log sample data after aggregation
